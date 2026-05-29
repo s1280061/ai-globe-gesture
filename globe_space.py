@@ -262,9 +262,26 @@ class GlobeSpace:
         self._dwell_time:    float = 1.5
         self._dwell_progress: float = 0.0
 
-        # ── フリック検出（右手の速度履歴）──
+        # ── グラブ（掴む）状態 ──
+        self._grab_active: bool = False   # 右手グーで掴んでいる
+        self._both_grab_active: bool = False  # 両手グーで移動
+
+        # ── 手首角度（前フレーム値）──
+        self._prev_right_wrist: float = 0.0
+        self._prev_left_wrist:  float = 0.0
+
+        # ── リセットタイマー（両手を上げて2秒）──
+        self._reset_timer: float = 0.0
+        self._globe_cx_default = WIN_W // 2
+        self._globe_cy_default = WIN_H // 2
+        self._reset_flash: float = 0.0
+
+        # ── ピンチ選択モード ──
+        self._pinch_active: bool = False
+
+        # ── フリック検出（後方互換、今はオープンハンドで代用）──
         self._rx_history: list = []   # (time, x, y) の直近履歴
-        self._flick_flash: float = 0.0  # フリック発動時の視覚フラッシュ残り時間
+        self._flick_flash: float = 0.0
 
         # 緯度・経度ライン（事前計算）
         self._grid_lats = range(-75, 90, 15)
@@ -345,8 +362,6 @@ class GlobeSpace:
     # ---- ジェスチャー処理（シンプル両手対応）----
 
     def _process_gesture(self, snap, dt):
-        rg = snap["right_gesture"]
-        lg = snap["left_gesture"]
         rv = snap["right_visible"]
         lv = snap["left_visible"]
         bv = snap["both_visible"]
@@ -354,91 +369,149 @@ class GlobeSpace:
         lx, ly = snap["left_x"],  snap["left_y"]
         hands_dist = snap["hands_distance"]
 
-        dlx = lx - self._prev_lx
-        dly = ly - self._prev_ly
+        right_fist  = snap.get("right_fist",  False)
+        left_fist   = snap.get("left_fist",   False)
+        right_pinch = snap.get("right_pinch", False)
+        right_wrist = snap.get("right_wrist_angle", 0.0)
+
         drx = rx - self._prev_rx
         dry = ry - self._prev_ry
+        dlx = lx - self._prev_lx
+        dly = ly - self._prev_ly
 
-        # ── 右手カーソル（point or open どちらでも動く）──
+        # ── カーソル（常に右手位置）──
         if rv:
             self._cursor = (int(rx * WIN_W), int(ry * WIN_H))
 
-        # ── 両手ズーム（最優先）──
-        if bv:
+        # ────────────────────────────────────────────────────
+        # 優先度1: リセット（両手を高く上げて2秒維持）
+        # ────────────────────────────────────────────────────
+        if bv and ry < 0.28 and ly < 0.28:
+            self._reset_timer += dt
+            if self._reset_timer >= 2.0:
+                self._do_reset()
+                self._reset_flash = 0.5
+                self._reset_timer = 0.0
+        else:
+            self._reset_timer = max(0.0, self._reset_timer - dt * 0.5)
+
+        if self._reset_flash > 0:
+            self._reset_flash = max(0.0, self._reset_flash - dt)
+
+        # ────────────────────────────────────────────────────
+        # 優先度2: 両手グー → 地球儀を画面内で移動
+        # ────────────────────────────────────────────────────
+        if bv and right_fist and left_fist:
+            self._both_grab_active = True
+            self._grab_active      = False
+            self._zoom_active      = False
+            avg_dx = (drx + dlx) * 0.5
+            avg_dy = (dry + dly) * 0.5
+            self.globe_cx = int(max(200, min(WIN_W - 200,
+                                            self.globe_cx + avg_dx * WIN_W)))
+            self.globe_cy = int(max(150, min(WIN_H - 150,
+                                            self.globe_cy + avg_dy * WIN_H)))
+
+        # ────────────────────────────────────────────────────
+        # 優先度3: 両手オープン → ズーム（Google Earthスタイル）
+        # ────────────────────────────────────────────────────
+        elif bv and not (right_fist and left_fist):
+            self._both_grab_active = False
+            self._grab_active      = False
             if not self._zoom_active:
                 self._prev_hands_dist = hands_dist
                 self._zoom_active = True
             else:
                 delta = hands_dist - self._prev_hands_dist
-                self.zoom += delta * 4
-                self.zoom = max(0.4, min(2.8, self.zoom))
+                self.zoom += delta * 4.5
+                self.zoom = max(0.4, min(3.0, self.zoom))
                 self._prev_hands_dist = hands_dist
+
         else:
-            self._zoom_active = False
+            self._zoom_active      = False
+            self._both_grab_active = False
 
-        # ── 右手の速度履歴を記録 ──
-        now = time.time()
-        if rv:
-            self._rx_history.append((now, rx, ry))
-        self._rx_history = [(t, x, y) for t, x, y in self._rx_history
-                            if now - t < 0.25]
+            # ────────────────────────────────────────────────
+            # 優先度4: 右手グー → 地球儀をつかんで移動 ＋ 手首でスピン
+            # ────────────────────────────────────────────────
+            if rv and right_fist:
+                self._grab_active = True
+                self._auto_spin   = False
 
-        # ── フリック検出（左手あり・なし問わず）──
-        flicked = self._detect_flick()
-        if flicked and rv:
-            self._auto_spin = False
-            vx, vy = flicked
-            self.vel_lon += vx * 14
-            self.vel_lat -= vy * 14
-            self._flick_flash = 0.25
+                # 位置移動（直接ドラッグ）
+                self.globe_cx = int(max(200, min(WIN_W - 200,
+                                                self.globe_cx + drx * WIN_W)))
+                self.globe_cy = int(max(150, min(WIN_H - 150,
+                                                self.globe_cy + dry * WIN_H)))
+
+                # 手首のひねり → 地球儀スピン（角度差分）
+                d_wrist = right_wrist - self._prev_right_wrist
+                # 角度のラップアラウンド補正
+                if d_wrist >  math.pi: d_wrist -= 2 * math.pi
+                if d_wrist < -math.pi: d_wrist += 2 * math.pi
+                self.vel_lon += d_wrist * 4.0   # 感度調整
+
+            # ────────────────────────────────────────────────
+            # 優先度5: 右手オープン → 地球儀を直接なぞって回転
+            # ────────────────────────────────────────────────
+            elif rv and not right_fist:
+                self._grab_active = False
+
+                # 直接回転（なぞる感覚）
+                # 手を右 → 地球儀を右回転（rot_lon 増加）
+                # 手を下 → 地球儀を下回転（rot_lat 増加）
+                SENS = 6.0
+                self.rot_lon += drx * SENS
+                self.rot_lat += dry * SENS
+                self.rot_lat  = max(-1.4, min(1.4, self.rot_lat))
+
+            else:
+                self._grab_active = False
+
+        # ── ピンチ → 選択モード ──
+        if rv and right_pinch and not self._pinch_active:
+            self._pinch_active = True
+            hit = self._hit_location(*self._cursor)
+            if hit is not None:
+                name = LOCATIONS[hit][2]
+                if name != self._selected_loc or not self.float_nodes:
+                    self._selected_loc  = name
+                    self._expanding_loc = name
+                    self.float_nodes.clear()
+                    self.ai.ask(name)
+        elif not right_pinch:
+            self._pinch_active = False
+
+        # ── ドウェル選択（右手オープン＆静止）──
+        if not right_fist and not right_pinch:
+            self._update_dwell(rv, "open", dt)
+        else:
+            self._dwell_loc_idx  = None
+            self._dwell_progress = 0.0
 
         # フラッシュのカウントダウン
         if self._flick_flash > 0:
             self._flick_flash = max(0.0, self._flick_flash - dt)
 
-        # ── ドウェル選択: 右手が都市に向いて静止 → 自動選択 ──
-        self._update_dwell(rv, rg, dt)
-
         self._prev_rx = rx; self._prev_ry = ry
         self._prev_lx = lx; self._prev_ly = ly
-        self._prev_right_gesture = rg
-        self._prev_left_gesture  = lg
+        self._prev_right_wrist = right_wrist
 
-    def _detect_flick(self):
-        """
-        直近の右手速度からフリックを検出。
-        十分な速度があれば (vx, vy) を返す。なければ None。
-        """
-        if len(self._rx_history) < 3:
-            return None
-
-        # 直近 0.12 秒の平均速度を計算
-        recent = [(t, x, y) for t, x, y in self._rx_history
-                  if time.time() - t < 0.12]
-        if len(recent) < 2:
-            return None
-
-        t0, x0, y0 = recent[0]
-        t1, x1, y1 = recent[-1]
-        dt_ = t1 - t0
-        if dt_ < 1e-4:
-            return None
-
-        vx = (x1 - x0) / dt_
-        vy = (y1 - y0) / dt_
-        speed = math.hypot(vx, vy)
-
-        FLICK_THRESHOLD = 0.6   # 正規化速度のしきい値
-        if speed > FLICK_THRESHOLD:
-            # 検出したら履歴をクリア（二重検出防止）
-            self._rx_history.clear()
-            return vx, vy
-        return None
+    def _do_reset(self):
+        """地球儀の位置・回転・ズームを初期化"""
+        self.globe_cx  = self._globe_cx_default
+        self.globe_cy  = self._globe_cy_default
+        self.rot_lon   = 0.0
+        self.rot_lat   = 0.2
+        self.zoom      = 1.0
+        self.vel_lon   = 0.0
+        self.vel_lat   = 0.0
+        self._auto_spin = False
+        print("[GLOBE] リセット完了")
 
     def _update_dwell(self, rv: bool, rg: str, dt: float):
         """右手が都市の上で静止している時間を計測し、閾値で自動選択"""
-        # 手が見えていて、グーでも両手ズームでもない時だけ有効
-        if not rv or rg == "fist":
+        if not rv:
             self._dwell_loc_idx  = None
             self._dwell_progress = 0.0
             return
@@ -730,11 +803,18 @@ class GlobeSpace:
         # 知識ノード
         self._draw_float_nodes()
 
-        # フリックフラッシュ
+        # フリックフラッシュ（後方互換）
         if self._flick_flash > 0:
             alpha = int(self._flick_flash / 0.25 * 60)
             flash = pygame.Surface((WIN_W, WIN_H), pygame.SRCALPHA)
             flash.fill((120, 200, 255, alpha))
+            self.screen.blit(flash, (0, 0))
+
+        # リセットフラッシュ（白く光る）
+        if self._reset_flash > 0:
+            alpha = int(self._reset_flash / 0.5 * 120)
+            flash = pygame.Surface((WIN_W, WIN_H), pygame.SRCALPHA)
+            flash.fill((220, 240, 255, alpha))
             self.screen.blit(flash, (0, 0))
 
         # フィルムグレイン
@@ -983,25 +1063,46 @@ class GlobeSpace:
 
     def _draw_cursor(self):
         snap = self.gs.snapshot()
-        g  = snap["right_gesture"]
-        rv = snap["right_visible"]
+        rv   = snap["right_visible"]
+        rf   = snap.get("right_fist",  False)
+        rp   = snap.get("right_pinch", False)
         cx, cy = self._cursor
 
         if not rv:
             return  # 手が見えていなければ描画しない
 
-        # ジェスチャーで色変更
-        if g == "fist":
-            c = (255, 100, 60)   # 橙：回転中
+        # ジェスチャーで色・形変更
+        if rf:
+            c = (100, 120, 255)  # 青紫：グラブ中
+            # グラブ時は閉じた手のアイコン（塗りつぶし円）
+            pygame.draw.circle(self.screen, c, (cx, cy), 8)
+            pygame.draw.circle(self.screen, (200, 210, 255), (cx, cy), 8, 2)
+        elif rp:
+            c = (0, 220, 220)    # シアン：ピンチ
+            pygame.draw.circle(self.screen, c, (cx, cy), 6)
+            pygame.draw.circle(self.screen, (200, 255, 255), (cx, cy), 6, 2)
         elif self._dwell_loc_idx is not None:
             c = (80, 220, 255)   # 水色：ホバー中
+            pygame.draw.line(self.screen, c, (cx-14, cy), (cx+14, cy), 1)
+            pygame.draw.line(self.screen, c, (cx, cy-14), (cx, cy+14), 1)
+            pygame.draw.circle(self.screen, c, (cx, cy), 5, 1)
         else:
-            c = (200, 220, 255)  # 白：通常
+            c = (200, 220, 255)  # 白：通常（オープンハンド）
+            pygame.draw.line(self.screen, c, (cx-14, cy), (cx+14, cy), 1)
+            pygame.draw.line(self.screen, c, (cx, cy-14), (cx, cy+14), 1)
+            pygame.draw.circle(self.screen, c, (cx, cy), 5, 1)
 
-        # 十字カーソル
-        pygame.draw.line(self.screen, c, (cx-14, cy), (cx+14, cy), 1)
-        pygame.draw.line(self.screen, c, (cx, cy-14), (cx, cy+14), 1)
-        pygame.draw.circle(self.screen, c, (cx, cy), 5, 1)
+        # リセットタイマーUI（両手が高い位置にある時）
+        if self._reset_timer > 0:
+            prog = min(self._reset_timer / 2.0, 1.0)
+            r = 40
+            bar_w = int(160 * prog)
+            pygame.draw.rect(self.screen, (60, 80, 110),
+                             (WIN_W//2 - 80, WIN_H//2 + 60, 160, 12), border_radius=6)
+            pygame.draw.rect(self.screen, (100, 200, 255),
+                             (WIN_W//2 - 80, WIN_H//2 + 60, bar_w, 12), border_radius=6)
+            msg = self.font_md.render("RESET...", True, (100, 200, 255))
+            self.screen.blit(msg, (WIN_W//2 - msg.get_width()//2, WIN_H//2 + 78))
 
         # ── ドウェルプログレスリング ──
         if self._dwell_progress > 0.0:
@@ -1043,23 +1144,33 @@ class GlobeSpace:
         fps_c  = snap["fps"]
         fps_a  = self.clock.get_fps()
 
-        # 操作ガイド（左上）─ 左手/右手/両手で色分け
+        # 操作ガイド（左上）
+        snap2   = self.gs.snapshot()
+        rf2     = snap2.get("right_fist", False)
+        lf2     = snap2.get("left_fist",  False)
+        rp2     = snap2.get("right_pinch", False)
         dwell_active = self._dwell_loc_idx is not None
-        flick_active = self._flick_flash > 0
+        grab_active  = self._grab_active
+        zoom_active  = self._zoom_active
+        reset_active = self._reset_timer > 0.1
         guide = [
-            ("💨 右手を素早く払う",  "地球を回す",        (255, 180, 80),  flick_active),
-            ("☝ 右手をかざす",      "カーソル移動",      (0,   220, 100), rv and not flick_active),
-            ("🎯 都市の上で止まる",  "1.5秒 → AI解説",   (80,  200, 255), dwell_active),
-            ("🤲 両手を広げ縮める", "ズーム",            (255, 220, 50),  bv),
+            ("🖐 手を開いて動かす",  "地球儀を回す",       (200, 220, 255), rv and not rf2 and not bv),
+            ("✊ グーで動かす",      "地球儀を移動",       (100, 120, 255), grab_active),
+            ("↩ グー＋手首ひねり",  "地球儀をスピン",     (160, 140, 255), grab_active),
+            ("🤲 両手を広げ縮める", "ズーム",             (255, 220, 50),  zoom_active),
+            ("✊✊ 両手グー移動",    "地球儀を移動",       (200, 160, 255), self._both_grab_active),
+            ("👆 ピンチ",           "都市を選択",         (0,   220, 220), rp2),
+            ("🎯 都市の上で止まる",  "1.5秒 → AI解説",    (80,  200, 255), dwell_active),
+            ("🙌 両手を高く2秒",    "リセット",           (255, 120, 80),  reset_active),
         ]
-        panel_h = len(guide) * 28 + 16
-        pygame.draw.rect(self.screen, (10, 12, 30), (10, 10, 290, panel_h), border_radius=8)
+        panel_h = len(guide) * 24 + 16
+        pygame.draw.rect(self.screen, (10, 12, 30), (10, 10, 300, panel_h), border_radius=8)
 
         for i, (icon, desc, c, active) in enumerate(guide):
             fc = c if active else (60, 70, 95)
             prefix = "▶ " if active else "  "
             s = self.font_md.render(f"{prefix}{icon}  {desc}", True, fc)
-            self.screen.blit(s, (14, 18 + i * 28))
+            self.screen.blit(s, (14, 18 + i * 24))
 
         # 手の検出状態バッジ
         badge_y = panel_h + 18
