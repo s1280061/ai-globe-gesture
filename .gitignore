@@ -4,6 +4,9 @@ recordings/
 *_tmp.mp4
 *_audio.wav
 
+# GIF（ルートのdemo.gifは除外しない）
+recordings/*.gif
+
 # テクスチャ（大きいファイル）
 world_map.jpg
 
