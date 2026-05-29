@@ -1,0 +1,21 @@
+# 録画ファイル
+recordings/
+*.mp4
+*_tmp.mp4
+*_audio.wav
+
+# テクスチャ（大きいファイル）
+world_map.jpg
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# モデルファイル
+*.pt
+
+# OS
+.DS_Store
+Thumbs.db
