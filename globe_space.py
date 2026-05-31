@@ -131,8 +131,30 @@ def project(v, scale, cx, cy):
 # AI 解説生成
 # ============================================================
 class GlobeAI:
+    # API を使わない時のダミーデータ
+    _DUMMY = {
+        "東京":        [("文化","茶道・歌舞伎"),("歴史","江戸幕府"),("経済","自動車産業"),("自然","富士山"),("食文化","寿司・ラーメン")],
+        "ニューヨーク":[("文化","自由の女神"),("歴史","独立宣言"),("経済","ウォール街"),("自然","セントラルパーク"),("食文化","ピザ・ベーグル")],
+        "パリ":        [("文化","エッフェル塔"),("歴史","フランス革命"),("経済","ファッション"),("自然","セーヌ川"),("食文化","クロワッサン")],
+        "北京":        [("文化","万里の長城"),("歴史","故宮"),("経済","製造業"),("自然","黄山"),("食文化","北京ダック")],
+        "ロンドン":    [("文化","ビッグベン"),("歴史","大英帝国"),("経済","金融都市"),("自然","テムズ川"),("食文化","フィッシュ＆チップス")],
+    }
+    _DEFAULT_DUMMY = [("文化","伝統芸能"),("歴史","古代遺跡"),("経済","貿易港"),("自然","豊かな大地"),("食文化","郷土料理")]
+
     def __init__(self):
-        self.client  = anthropic.Anthropic()
+        import os
+        self._use_api = bool(os.environ.get("ANTHROPIC_API_KEY", ""))
+        self._client  = None
+        if self._use_api:
+            try:
+                self._client = anthropic.Anthropic()
+                print("[AI] Claude API 有効")
+            except Exception as e:
+                print(f"[AI] API初期化失敗: {e} → ダミーモードで動作")
+                self._use_api = False
+        else:
+            print("[AI] APIキーなし → ダミーデータモードで動作")
+
         self._result = None
         self._lock   = threading.Lock()
         self._thread = None
@@ -156,6 +178,15 @@ class GlobeAI:
             return r
 
     def _call(self):
+        if not self._use_api:
+            # ダミーデータを返す（0.5秒後に表示）
+            import time as _t
+            _t.sleep(0.5)
+            data = self._DUMMY.get(self._topic, self._DEFAULT_DUMMY)
+            with self._lock:
+                self._result = [(cat, kw) for cat, kw in data]
+            return
+
         prompt = (
             f"「{self._topic}」について、以下の観点で各10文字以内の日本語キーワードを5つ挙げてください。\n"
             "観点: 文化・歴史・経済・自然・食文化\n"
@@ -163,7 +194,7 @@ class GlobeAI:
             "例:\n文化:茶道\n歴史:江戸幕府\n経済:自動車産業\n自然:富士山\n食文化:寿司"
         )
         try:
-            msg = self.client.messages.create(
+            msg = self._client.messages.create(
                 model="claude-opus-4-5",
                 max_tokens=200,
                 messages=[{"role": "user", "content": prompt}],

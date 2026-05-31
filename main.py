@@ -17,15 +17,14 @@ def check_api_key():
     key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not key:
         print("=" * 55)
-        print(" ANTHROPIC_API_KEY が設定されていません。")
-        print(" ノード選択・都市選択時の AI 機能が動作しません。")
+        print(" ANTHROPIC_API_KEY が未設定です。")
+        print(" → ダミーデータモードで動作します（API不要）")
         print()
-        print(" 設定方法:")
-        print("   set ANTHROPIC_API_KEY=sk-ant-xxxx   (Windows)")
+        print(" AI機能を有効にする場合:")
+        print("   $env:ANTHROPIC_API_KEY='sk-ant-xxxx'  (PowerShell)")
         print("=" * 55)
-        ans = input("APIキーなしで続行しますか？ (y/n): ").strip().lower()
-        if ans != "y":
-            sys.exit(0)
+    else:
+        print("[OK] ANTHROPIC_API_KEY 検出 → AI機能が有効です")
 
 
 def select_mode():
